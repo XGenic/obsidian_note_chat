@@ -1,0 +1,16 @@
+
+# --- Secrets ---
+# Ignore the file containing API keys.
+.env
+claude_advice.txt
+gemini_session_notes.txt
+Note Examples/
+
+# --- Database ---
+# Ignore the ChromaDB database directory.
+chromadb/
+
+# --- Python ---
+# Ignore Python cache files.
+__pycache__/
+*.pyc
