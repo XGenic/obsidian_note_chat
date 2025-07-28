@@ -8,6 +8,8 @@ from openai import OpenAI
 import time
 from dotenv import load_dotenv
 import json
+import hashlib
+from pathlib import Path
 
 # --- CONFIGURATION ---
 load_dotenv()
@@ -17,6 +19,30 @@ GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 OBSIDIAN_VAULT_PATH = "C:/Users/Denis/Documents/Obsidian Vault"
 CHROMA_DB_PATH = "D:/Documents/chromadb"
 COLLECTION_NAME = "obsidian_vault_main"
+
+# --- PATH MANAGEMENT ---
+class ChromaDBPathManager:
+    def __init__(self, vault_root):
+        self.vault_root = Path(vault_root).resolve()
+    
+    def get_canonical_path(self, file_path):
+        """Convert any path variant to the canonical format."""
+        path = Path(file_path).resolve()
+        
+        try:
+            # Try to make it relative to vault root
+            relative = path.relative_to(self.vault_root)
+            canonical = str(relative).replace('\\', '/')
+        except ValueError:
+            # File outside vault, use absolute path
+            canonical = str(path).replace('\\', '/')
+        
+        return canonical
+    
+    def get_path_id(self, file_path):
+        """Generate a unique ID for any path variant."""
+        canonical = self.get_canonical_path(file_path)
+        return hashlib.md5(canonical.encode()).hexdigest()[:12]
 
 # --- API CLIENTS ---
 gemini_client = None
@@ -88,7 +114,7 @@ def classify_note(content, filename):
     # Rule-based classification
     if "## Overall Summary" in content and "# Transcript" in content:
         return "conversation"
-    if re.search(r'##\s*(\[\[\d{4}-\d{2}-\d{2}\]\]|Episode\s*\d+|Chapter\s*\d+)', content):
+    if re.search(r'##\s*(?:\b\d{4}-\d{2}-\d{2}\b|Episode\s*\d+|Chapter\s*\d+)', content):
         return "review_journal"
     if re.match(r'\d{4}-\d{2}-\d{2}\.md', filename) and "# Thoughts Through The Day" in content:
         return "daily_note"
@@ -100,7 +126,7 @@ def classify_note(content, filename):
 # --- CHUNKING LOGIC ---
 def chunk_text_by_sections(text, min_tokens=100, max_tokens=1000):
     encoder = tiktoken.get_encoding("cl100k_base")
-    section_pattern = r'(##\s*(?:\[\[\d{4}-\d{2}-\d{2}\]\]|Episode\s*\d+|Chapter\s*\d+).*?)(?=(##\s*(?:\[\[\d{4}-\d{2}-\d{2}\]\]|Episode\s*\d+|Chapter\s*\d+)|$))'
+    section_pattern = r'(##\s*(?:\b\d{4}-\d{2}-\d{2}\b|Episode\s*\d+|Chapter\s*\d+).*?)(?=(##\s*(?:\b\d{4}-\d{2}-\d{2}\b|Episode\s*\d+|Chapter\s*\d+)|$))'
     sections = re.findall(section_pattern, text, re.DOTALL)
     
     chunks, metadatas = [], []
@@ -148,9 +174,13 @@ def chunk_text_by_sections(text, min_tokens=100, max_tokens=1000):
 def main():
     print("--- Starting Obsidian Vault Indexing ---")
 
+    path_manager = ChromaDBPathManager(OBSIDIAN_VAULT_PATH)
     embedding_function = OpenAIEmbeddingFunction(api_key=OPENAI_API_KEY)
     client_chroma = chromadb.PersistentClient(path=CHROMA_DB_PATH)
-    collection = client_chroma.get_or_create_collection(
+    
+    print("Clearing old collection to ensure clean re-indexing...")
+    client_chroma.delete_collection(name=COLLECTION_NAME)
+    collection = client_chroma.create_collection(
         name=COLLECTION_NAME,
         embedding_function=embedding_function
     )
@@ -161,78 +191,85 @@ def main():
             if not filename.endswith(".md"): continue
 
             file_path = os.path.join(root, filename)
-            try:
-                current_mtime = os.path.getmtime(file_path)
-            except FileNotFoundError:
-                print(f"Warning: File not found, skipping: {file_path}")
-                continue
+            canonical_path = path_manager.get_canonical_path(file_path)
+            path_id = path_manager.get_path_id(file_path)
+            
+            print(f"[PROCESSING] '{canonical_path}'...")
 
-            existing_record = collection.get(where={"parent_file": file_path}, limit=1, include=["metadatas"])
-            is_new = not existing_record['ids']
-            is_modified = not is_new and existing_record['metadatas'][0].get('mtime', 0) < current_mtime
+            with open(file_path, "r", encoding="utf-8") as f:
+                content = f.read()
+            
+            current_mtime = os.path.getmtime(file_path)
+            note_type = classify_note(content, os.path.basename(filename))
+            print(f"  -> Classified as: {note_type}")
 
-            if is_new or is_modified:
-                status = "NEW" if is_new else "MODIFIED"
-                print(f"[{status}] Processing '{os.path.basename(filename)}'...")
+            base_metadata = {
+                "mtime": current_mtime,
+                "parent_file": canonical_path,
+                "parent_file_id": path_id
+            }
 
-                with open(file_path, "r", encoding="utf-8") as f:
-                    content = f.read()
-                
-                note_type = classify_note(content, os.path.basename(filename))
-                print(f"  -> Classified as: {note_type}")
-
-                if is_modified:
-                    collection.delete(where={"parent_file": file_path})
-                    print(f"  -> Cleared old data for modified file.")
-
-                if note_type == "conversation":
-                    try:
-                        summary_marker = "## Overall Summary"
-                        transcript_marker = "# Transcript"
-                        summary_start = content.find(summary_marker)
-                        transcript_start = content.find(transcript_marker, summary_start)
+            if note_type == "conversation":
+                try:
+                    summary_marker = "## Overall Summary"
+                    transcript_marker = "# Transcript"
+                    summary_start = content.find(summary_marker)
+                    transcript_start = content.find(transcript_marker, summary_start)
+                    
+                    if summary_start != -1:
+                        summary_content = content[summary_start + len(summary_marker):transcript_start].strip()
+                        tags = generate_tags_with_llm(summary_content, gemini_client)
                         
-                        if summary_start != -1:
-                            summary_content = content[summary_start + len(summary_marker):transcript_start].strip()
-                            tags = generate_tags_with_llm(summary_content, gemini_client)
-                            collection.upsert(
-                                documents=[summary_content],
-                                ids=[file_path],
-                                metadatas=[{"source_type": "conversation_summary", "mtime": current_mtime, "parent_file": file_path, "tags": ", ".join(tags)}]
-                            )
-                            print(f"  -> Indexed summary for '{os.path.basename(filename)}'.")
-                        else:
-                             print(f"  -> Warning: Summary marker not found in '{os.path.basename(filename)}'. Skipping.")
-                    except Exception as e:
-                        print(f"  -> Error parsing summary for '{os.path.basename(filename)}': {e}. Skipping.")
+                        metadata = base_metadata.copy()
+                        metadata.update({
+                            "source_type": "conversation_summary",
+                            "tags": ", ".join(tags)
+                        })
 
-                elif note_type in ["review_journal", "daily_note"]:
-                    chunks, section_metadatas = chunk_text_by_sections(content)
-                    if chunks:
-                        chunk_ids = [f"{file_path}#chunk{i+1}" for i in range(len(chunks))]
-                        chunk_metadatas = []
-                        for i, chunk in enumerate(chunks):
-                            tags = generate_tags_with_llm(chunk, gemini_client)
-                            meta = {
-                                "source_type": f"{note_type}_section", "mtime": current_mtime,
-                                "parent_file": file_path, "section_id": section_metadatas[i]["section_id"],
-                                "tags": ", ".join(tags)
-                            }
-                            chunk_metadatas.append(meta)
-                        
-                        collection.upsert(documents=chunks, ids=chunk_ids, metadatas=chunk_metadatas)
-                        print(f"  -> Indexed {len(chunks)} chunks for '{os.path.basename(filename)}'.")
+                        collection.upsert(
+                            documents=[summary_content],
+                            ids=[f"{path_id}_summary"],
+                            metadatas=[metadata]
+                        )
+                        print(f"  -> Indexed summary for '{canonical_path}'.")
                     else:
-                        print(f"  -> No sections found to chunk in '{os.path.basename(filename)}'. Skipping.")
+                         print(f"  -> Warning: Summary marker not found in '{canonical_path}'. Skipping.")
+                except Exception as e:
+                    print(f"  -> Error parsing summary for '{canonical_path}': {e}. Skipping.")
 
-                else: # generic_note
-                    tags = generate_tags_with_llm(content, gemini_client)
-                    collection.upsert(
-                        documents=[content],
-                        ids=[file_path],
-                        metadatas=[{"source_type": "full_note", "mtime": current_mtime, "parent_file": file_path, "tags": ", ".join(tags)}]
-                    )
-                    print(f"  -> Indexed full note for '{os.path.basename(filename)}'.")
+            elif note_type in ["review_journal", "daily_note"]:
+                chunks, section_metadatas = chunk_text_by_sections(content)
+                if chunks:
+                    chunk_ids = [f"{path_id}_chunk{i+1}" for i in range(len(chunks))]
+                    chunk_metadatas = []
+                    for i, chunk in enumerate(chunks):
+                        tags = generate_tags_with_llm(chunk, gemini_client)
+                        meta = base_metadata.copy()
+                        meta.update({
+                            "source_type": f"{note_type}_section",
+                            "section_id": section_metadatas[i]["section_id"],
+                            "tags": ", ".join(tags)
+                        })
+                        chunk_metadatas.append(meta)
+                    
+                    collection.upsert(documents=chunks, ids=chunk_ids, metadatas=chunk_metadatas)
+                    print(f"  -> Indexed {len(chunks)} chunks for '{canonical_path}'.")
+                else:
+                    print(f"  -> No sections found to chunk in '{canonical_path}'. Skipping.")
+
+            else: # generic_note
+                tags = generate_tags_with_llm(content, gemini_client)
+                metadata = base_metadata.copy()
+                metadata.update({
+                    "source_type": "full_note",
+                    "tags": ", ".join(tags)
+                })
+                collection.upsert(
+                    documents=[content],
+                    ids=[path_id],
+                    metadatas=[metadata]
+                )
+                print(f"  -> Indexed full note for '{canonical_path}'.")
 
     print("--- Indexing Complete ---")
 
