@@ -16,7 +16,7 @@ load_dotenv()
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 
-OBSIDIAN_VAULT_PATH = "C:/Users/Denis/Documents/Obsidian Vault"
+OBSIDIAN_VAULT_PATH = "D:/Documents/Obsidian"
 CHROMA_DB_PATH = "D:/Documents/chromadb"
 COLLECTION_NAME = "obsidian_vault_main"
 
@@ -27,7 +27,8 @@ class ChromaDBPathManager:
     
     def get_canonical_path(self, file_path):
         """Convert any path variant to the canonical format."""
-        path = Path(file_path).resolve()
+        raw_path = Path(file_path)
+        path = (self.vault_root / raw_path).resolve() if not raw_path.is_absolute() else raw_path.resolve()
         
         try:
             # Try to make it relative to vault root
@@ -276,7 +277,7 @@ def main():
 if __name__ == "__main__":
     try:
         nltk.data.find('tokenizers/punkt')
-    except nltk.downloader.DownloadError:
+    except LookupError:
         print("NLTK 'punkt' tokenizer not found. Downloading...")
         nltk.download('punkt')
     main()

@@ -6,7 +6,6 @@ import tkinter as tk
 from tkinter import scrolledtext, Entry, Button, Radiobutton, StringVar, Frame
 from dotenv import load_dotenv
 from collections import Counter
-from dateparser.search import search_dates
 import parsedatetime
 from datetime import datetime, timedelta
 import re
@@ -31,7 +30,8 @@ class ChromaDBPathManager:
     
     def get_canonical_path(self, file_path):
         """Convert any path variant to the canonical format."""
-        path = Path(file_path).resolve()
+        raw_path = Path(file_path)
+        path = (self.vault_root / raw_path).resolve() if not raw_path.is_absolute() else raw_path.resolve()
         
         try:
             # Try to make it relative to vault root
@@ -76,7 +76,7 @@ class OpenAIEmbeddingFunction(chromadb.EmbeddingFunction):
 embedding_function = OpenAIEmbeddingFunction(api_key=OPENAI_API_KEY)
 client_chroma = chromadb.PersistentClient(path=CHROMA_DB_PATH)
 collection = client_chroma.get_collection(name=COLLECTION_NAME, embedding_function=embedding_function)
-path_manager = ChromaDBPathManager("C:/Users/Denis/Documents/Obsidian Vault")
+path_manager = ChromaDBPathManager("D:/Documents/Obsidian")
 
 # --- DATE-BASED RETRIEVAL LOGIC ---
 

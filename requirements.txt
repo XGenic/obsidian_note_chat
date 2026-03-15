@@ -1,4 +1,7 @@
 chromadb
+nltk
+numpy
 openai
+parsedatetime
 python-dotenv
-dateparser
+tiktoken

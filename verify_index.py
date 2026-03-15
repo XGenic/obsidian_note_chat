@@ -1,8 +1,23 @@
 import os
 import chromadb
+from pathlib import Path
+
+# --- PATH MANAGEMENT ---
+class ChromaDBPathManager:
+    def __init__(self, vault_root):
+        self.vault_root = Path(vault_root).resolve()
+
+    def get_canonical_path(self, file_path):
+        raw_path = Path(file_path)
+        path = (self.vault_root / raw_path).resolve() if not raw_path.is_absolute() else raw_path.resolve()
+        try:
+            relative = path.relative_to(self.vault_root)
+            return str(relative).replace('\\', '/')
+        except ValueError:
+            return str(path).replace('\\', '/')
 
 # --- CONFIGURATION ---
-OBSIDIAN_VAULT_PATH = "C:/Users/Denis/Documents/Obsidian Vault"
+OBSIDIAN_VAULT_PATH = "D:/Documents/Obsidian"
 CHROMA_DB_PATH = "D:/Documents/chromadb"
 COLLECTION_NAME = "obsidian_vault_main"
 
@@ -12,6 +27,7 @@ def verify_index_completeness():
     to find discrepancies.
     """
     print("--- Starting Index Verification ---")
+    path_manager = ChromaDBPathManager(OBSIDIAN_VAULT_PATH)
 
     # 1. Get all .md files from the Obsidian Vault, respecting ignore rules.
     print(f"Scanning vault path: {OBSIDIAN_VAULT_PATH}")
@@ -21,8 +37,8 @@ def verify_index_completeness():
         dirs[:] = [d for d in dirs if not d.startswith(('!', '.'))]
         for filename in files:
             if filename.endswith(".md"):
-                full_path = os.path.join(root, filename).replace('\\', '/')
-                disk_files.add(full_path)
+                full_path = os.path.join(root, filename)
+                disk_files.add(path_manager.get_canonical_path(full_path))
     print(f"Found {len(disk_files)} '.md' files in the vault.")
 
     # 2. Get all unique 'parent_file' metadata from ChromaDB.
@@ -39,9 +55,7 @@ def verify_index_completeness():
         indexed_files = set()
         for metadata in all_records['metadatas']:
             if 'parent_file' in metadata:
-                # Normalize path separators for consistent comparison
-                parent_file_path = metadata['parent_file'].replace('\\', '/')
-                indexed_files.add(parent_file_path)
+                indexed_files.add(path_manager.get_canonical_path(metadata['parent_file']))
 
         print(f"Found {len(indexed_files)} unique indexed files in ChromaDB.")
 
