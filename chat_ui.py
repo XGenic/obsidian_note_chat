@@ -20,6 +20,9 @@ GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 
 CHROMA_DB_PATH = "D:/Documents/chromadb"
 COLLECTION_NAME = "obsidian_vault_main"
+RETRIEVAL_N_RESULTS = 30
+KEYWORD_LIMIT = 20
+FINAL_CONTEXT_DOCS = 12
 last_focused_document = None
 conversation_history = [] 
 
@@ -321,13 +324,13 @@ def send_message(event=None):
 
             semantic_results = collection.query(
                 query_texts=[query_text],
-                n_results=15,
+                n_results=RETRIEVAL_N_RESULTS,
                 include=["metadatas", "documents"]
             )
 
             keyword_results = collection.get(
                 where_document={"$contains": user_input},
-                limit=10,
+                limit=KEYWORD_LIMIT,
                 include=["metadatas", "documents"]
             )
 
@@ -376,8 +379,8 @@ def send_message(event=None):
                               f"{os.path.basename(last_focused_document)}")
                     else:
                         last_focused_document = None
-                    final_documents = initial_results["documents"][0][:8]
-                    final_metadatas = initial_results["metadatas"][0][:8]
+                    final_documents = initial_results["documents"][0][:FINAL_CONTEXT_DOCS]
+                    final_metadatas = initial_results["metadatas"][0][:FINAL_CONTEXT_DOCS]
             else:
                 final_documents = []
                 final_metadatas = []
@@ -411,7 +414,7 @@ def send_message(event=None):
             chat_history.config(state=tk.DISABLED)
             return
 
-        model_id = "grok-3-mini" if selected_model_name == "Grok" else "models/gemini-1.5-flash-latest"
+        model_id = "grok-3-mini" if selected_model_name == "Grok" else "gemini-2.5-flash"
 
         system_prompt = ('You are a helpful AI assistant, acting as a conversational partner '
                          'with a casual and loose tone. Your primary goal is to answer my question. '
