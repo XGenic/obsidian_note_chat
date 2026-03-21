@@ -264,9 +264,8 @@ def send_message(event=None):
                     print(f"Broad query detected. Focusing on top result: "
                           f"{os.path.basename(top_result_parent)}")
                     last_focused_document = top_result_parent
-                    canonical_top_result = path_manager.get_canonical_path(top_result_parent)
                     full_context_results = collection.get(
-                        where={"parent_file": canonical_top_result},
+                        where={"parent_file": top_result_parent},
                         include=["documents", "metadatas"])
                     final_documents = full_context_results["documents"]
                     final_metadatas = full_context_results["metadatas"]
