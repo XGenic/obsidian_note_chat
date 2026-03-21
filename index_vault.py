@@ -51,6 +51,59 @@ class ChromaDBPathManager:
         canonical = self.get_canonical_path(file_path)
         return hashlib.md5(canonical.encode()).hexdigest()[:12]
 
+
+def get_file_signature(file_path):
+    """Return a stable file signature for incremental indexing checks."""
+    stat_result = os.stat(file_path)
+    return {
+        "mtime": stat_result.st_mtime,
+        "mtime_ns": int(stat_result.st_mtime_ns),
+        "size_bytes": int(stat_result.st_size),
+    }
+
+
+def compute_content_hash(content):
+    return hashlib.sha256(content.encode("utf-8")).hexdigest()
+
+
+def build_indexed_file_state(existing_metadatas):
+    indexed_files = {}
+    indexed_parent_files = set()
+
+    for metadata in existing_metadatas:
+        parent_file = metadata.get("parent_file")
+        parent_file_id = metadata.get("parent_file_id")
+        if not parent_file or not parent_file_id:
+            continue
+
+        indexed_parent_files.add(parent_file)
+        state = indexed_files.setdefault(parent_file_id, {})
+        state["parent_file"] = parent_file
+        state["mtime"] = metadata.get("mtime")
+        state["mtime_ns"] = metadata.get("mtime_ns")
+        state["size_bytes"] = metadata.get("size_bytes")
+        state["content_hash"] = metadata.get("content_hash")
+
+    return indexed_files, indexed_parent_files
+
+
+def should_skip_file(existing_state, current_signature):
+    if not existing_state:
+        return False, "new file"
+
+    stored_mtime_ns = existing_state.get("mtime_ns")
+    stored_size = existing_state.get("size_bytes")
+    if stored_mtime_ns is not None and stored_size is not None:
+        if int(stored_mtime_ns) == current_signature["mtime_ns"] and int(stored_size) == current_signature["size_bytes"]:
+            return True, "mtime_ns + size match"
+
+    stored_mtime = existing_state.get("mtime")
+    if stored_mtime is not None and stored_size is not None:
+        if stored_mtime == current_signature["mtime"] and int(stored_size) == current_signature["size_bytes"]:
+            return True, "legacy mtime + size match"
+
+    return False, "file signature changed"
+
 # --- API CLIENTS ---
 gemini_client = None
 if GEMINI_API_KEY:
@@ -225,12 +278,15 @@ def chunk_text_fixed_chunks(text, max_tokens=GENERIC_NOTE_CHUNK_MAX_TOKENS, min_
     return chunks
 
 
-def build_note_records(content, canonical_path, path_id, current_mtime):
+def build_note_records(content, canonical_path, path_id, file_signature, content_hash):
     note_type = classify_note(content, Path(canonical_path).name)
     print(f"  -> Classified as: {note_type}")
 
     base_metadata = {
-        "mtime": current_mtime,
+        "mtime": file_signature["mtime"],
+        "mtime_ns": file_signature["mtime_ns"],
+        "size_bytes": file_signature["size_bytes"],
+        "content_hash": content_hash,
         "parent_file": canonical_path,
         "parent_file_id": path_id
     }
@@ -338,15 +394,7 @@ def main(full_reindex=False):
 
     existing_records = collection.get(include=["metadatas"])
     existing_metadatas = existing_records.get("metadatas", [])
-    indexed_mtimes = {}
-    indexed_parent_files = set()
-    for metadata in existing_metadatas:
-        parent_file = metadata.get("parent_file")
-        parent_file_id = metadata.get("parent_file_id")
-        if not parent_file or not parent_file_id:
-            continue
-        indexed_parent_files.add(parent_file)
-        indexed_mtimes[parent_file_id] = metadata.get("mtime")
+    indexed_files, indexed_parent_files = build_indexed_file_state(existing_metadatas)
 
     seen_parent_files = set()
     processed_count = 0
@@ -364,11 +412,52 @@ def main(full_reindex=False):
             
             print(f"[PROCESSING] '{canonical_path}'...")
 
-            current_mtime = os.path.getmtime(file_path)
-            if indexed_mtimes.get(path_id) == current_mtime:
-                print(f"  -> Unchanged (mtime match). Skipping.")
+            current_signature = get_file_signature(file_path)
+            existing_state = indexed_files.get(path_id)
+            should_skip, skip_reason = should_skip_file(existing_state, current_signature)
+            if should_skip:
+                print(f"  -> Unchanged ({skip_reason}). Skipping.")
                 skipped_count += 1
                 continue
+
+            with open(file_path, "r", encoding="utf-8") as f:
+                content = f.read()
+
+            current_content_hash = compute_content_hash(content)
+            stored_content_hash = existing_state.get("content_hash") if existing_state else None
+            if stored_content_hash and stored_content_hash == current_content_hash:
+                print(
+                    "  -> Content unchanged; refreshing metadata only "
+                    f"(stored mtime_ns={existing_state.get('mtime_ns')}, current mtime_ns={current_signature['mtime_ns']})."
+                )
+                existing_note_records = collection.get(
+                    where={"parent_file_id": {"$eq": path_id}},
+                    include=["metadatas"]
+                )
+                existing_ids = existing_note_records.get("ids", [])
+                updated_metadatas = []
+                for metadata in existing_note_records.get("metadatas", []):
+                    refreshed_metadata = dict(metadata)
+                    refreshed_metadata.update({
+                        "mtime": current_signature["mtime"],
+                        "mtime_ns": current_signature["mtime_ns"],
+                        "size_bytes": current_signature["size_bytes"],
+                        "content_hash": current_content_hash,
+                    })
+                    updated_metadatas.append(refreshed_metadata)
+
+                if existing_ids and updated_metadatas:
+                    collection.update(ids=existing_ids, metadatas=updated_metadatas)
+                    skipped_count += 1
+                    print("  -> Updated stored file signature without re-embedding.")
+                    continue
+
+            if existing_state:
+                print(
+                    "  -> Reindexing due to signature change "
+                    f"(stored mtime_ns={existing_state.get('mtime_ns')}, current mtime_ns={current_signature['mtime_ns']}, "
+                    f"stored size={existing_state.get('size_bytes')}, current size={current_signature['size_bytes']})."
+                )
 
             existing_note_records = collection.get(
                 where={"parent_file_id": {"$eq": path_id}},
@@ -379,15 +468,13 @@ def main(full_reindex=False):
                 collection.delete(ids=existing_ids)
                 print(f"  -> Removed {len(existing_ids)} stale indexed chunks.")
 
-            with open(file_path, "r", encoding="utf-8") as f:
-                content = f.read()
-
             try:
                 documents, ids, metadatas = build_note_records(
                     content,
                     canonical_path,
                     path_id,
-                    current_mtime
+                    current_signature,
+                    current_content_hash
                 )
                 if ids:
                     collection.upsert(documents=documents, ids=ids, metadatas=metadatas)

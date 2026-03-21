@@ -5,12 +5,10 @@ from datetime import datetime, timedelta
 import tkinter as tk
 from tkinter import scrolledtext, Entry, Button, Radiobutton, StringVar, Frame
 from dotenv import load_dotenv
-from collections import Counter
-import parsedatetime
-from datetime import datetime, timedelta
 import re
 import hashlib
 from pathlib import Path
+from date_utils import get_date_range_from_query
 
 # --- CONFIGURATION ---
 load_dotenv()
@@ -25,6 +23,8 @@ KEYWORD_LIMIT = 20
 FINAL_CONTEXT_DOCS = 12
 last_focused_document = None
 conversation_history = [] 
+TITLE_MATCH_MIN_WORDS = 2
+TITLE_MATCH_LIMIT = 3
 
 # --- PATH MANAGEMENT ---
 class ChromaDBPathManager:
@@ -83,155 +83,45 @@ path_manager = ChromaDBPathManager("D:/Documents/Obsidian")
 
 # --- DATE-BASED RETRIEVAL LOGIC ---
 
-def get_date_range_from_query(user_input):
-    """Extract date range using parsedatetime with regex fallback."""
-    
-    # First, try parsedatetime
-    result = try_parsedatetime(user_input)
-    if result[0] is not None:
-        return result
-    
-    # Fallback to minimal regex patterns
-    result = try_regex_fallback(user_input)
-    if result[0] is not None:
-        return result
-    
-    return None, None
+def get_all_parent_files():
+    all_records = collection.get(include=["metadatas"])
+    return {
+        meta["parent_file"]
+        for meta in all_records["metadatas"]
+        if "parent_file" in meta
+    }
 
-def try_parsedatetime(user_input):
-    """Attempt to parse using parsedatetime library."""
-    try:
-        cal = parsedatetime.Calendar()
-        
-        # Clean up the input - remove non-temporal words that might confuse parser
-        temporal_query = extract_temporal_part(user_input)
-        
-        time_struct, parse_status = cal.parse(temporal_query)
-        
-        if parse_status == 0:  # Nothing parsed
-            return None, None
-            
-        parsed_datetime = datetime(*time_struct[:6])
-        
-        return determine_date_range(temporal_query, parsed_datetime, parse_status)
-        
-    except Exception as e:
-        print(f"parsedatetime failed: {e}")
-        return None, None
 
-def extract_temporal_part(user_input):
-    """Extract the likely temporal part of the query for better parsing."""
-    # Remove common non-temporal prefixes that might confuse the parser
-    cleaned = re.sub(r'^(show me|tell me about|summarize|what did i write about)\s+', '', user_input.lower())
-    
-    # Focus on temporal expressions
-    temporal_patterns = [
-        r'(last|past|previous)\s+(week|month|year|monday|tuesday|wednesday|thursday|friday|saturday|sunday)',
-        r'(this|current)\s+(week|month|year)',
-        r'(\d+)\s+(days?|weeks?|months?)\s+(ago|back)',
-        r'(yesterday|today|tomorrow)',
-        r'(beginning|start|end)\s+of\s+(this|last|current)\s+(week|month|year)',
-        r'\d{4}-\d{2}-\d{2}',  # ISO dates
-        r'\d{1,2}/\d{1,2}/\d{4}',  # US dates
-    ]
-    
-    for pattern in temporal_patterns:
-        match = re.search(pattern, cleaned)
-        if match:
-            return match.group(0)
-    
-    # If no specific pattern found, return cleaned input
-    return cleaned
+def normalize_for_match(text):
+    normalized = re.sub(r"[^a-z0-9]+", " ", text.lower())
+    return " ".join(normalized.split())
 
-def determine_date_range(temporal_query, parsed_datetime, parse_status):
-    """Convert parsed datetime to appropriate date range based on context."""
-    today = datetime.now()
-    
-    # Determine if this is a range or single date based on the query
-    if any(word in temporal_query for word in ['week', 'weeks']):
-        # Week-based query
-        if 'last' in temporal_query or 'past' in temporal_query:
-            # Last week: get the full week range
-            days_since_monday = parsed_datetime.weekday()
-            start_of_week = parsed_datetime - timedelta(days=days_since_monday)
-            end_of_week = start_of_week + timedelta(days=6)
-            return start_of_week, end_of_week
-        elif 'this' in temporal_query:
-            # This week: from Monday to today
-            days_since_monday = today.weekday()
-            start_of_week = today - timedelta(days=days_since_monday)
-            return start_of_week, today
-    
-    elif any(word in temporal_query for word in ['month', 'months']):
-        # Month-based query
-        if 'last' in temporal_query or 'past' in temporal_query:
-            # First and last day of the parsed month
-            first_day = parsed_datetime.replace(day=1)
-            next_month = first_day.replace(month=first_day.month + 1) if first_day.month < 12 else first_day.replace(year=first_day.year + 1, month=1)
-            last_day = next_month - timedelta(days=1)
-            return first_day, last_day
-    
-    elif any(word in temporal_query for word in ['day', 'days']):
-        # Day-based query with "X days ago"
-        if 'ago' in temporal_query:
-            return parsed_datetime, parsed_datetime
-    
-    # Default: single day
-    return parsed_datetime, parsed_datetime
 
-def try_regex_fallback(user_input):
-    """Minimal regex fallback for cases parsedatetime misses."""
-    today = datetime.now()
-    user_lower = user_input.lower()
-    
-    # Pattern 1: "last week" variations
-    if re.search(r'\b(last|past|previous)\s+(week)\b', user_lower):
-        days_since_monday = today.weekday()
-        start_of_this_week = today - timedelta(days=days_since_monday)
-        start_of_last_week = start_of_this_week - timedelta(days=7)
-        end_of_last_week = start_of_last_week + timedelta(days=6)
-        print("Regex fallback: last week")
-        return start_of_last_week, end_of_last_week
-    
-    # Pattern 2: "this week"
-    if re.search(r'\b(this|current)\s+(week)\b', user_lower):
-        days_since_monday = today.weekday()
-        start_of_this_week = today - timedelta(days=days_since_monday)
-        print("Regex fallback: this week")
-        return start_of_this_week, today
-    
-    # Pattern 3: "yesterday"
-    if re.search(r'\byesterday\b', user_lower):
-        yesterday = today - timedelta(days=1)
-        print("Regex fallback: yesterday")
-        return yesterday, yesterday
-    
-    # Pattern 4: "today"
-    if re.search(r'\btoday\b', user_lower):
-        print("Regex fallback: today")
-        return today, today
-    
-    # Pattern 5: ISO date format (YYYY-MM-DD)
-    iso_match = re.search(r'\b(\d{4}-\d{2}-\d{2})\b', user_input)
-    if iso_match:
-        try:
-            date = datetime.strptime(iso_match.group(1), '%Y-%m-%d')
-            print(f"Regex fallback: ISO date {iso_match.group(1)}")
-            return date, date
-        except ValueError:
-            pass
-    
-    # Pattern 6: US date format (MM/DD/YYYY)
-    us_match = re.search(r'\b(\d{1,2}/\d{1,2}/\d{4})\b', user_input)
-    if us_match:
-        try:
-            date = datetime.strptime(us_match.group(1), '%m/%d/%Y')
-            print(f"Regex fallback: US date {us_match.group(1)}")
-            return date, date
-        except ValueError:
-            pass
-    
-    return None, None
+def is_date_style_title(title):
+    return bool(re.fullmatch(r"\d{4} \d{2} \d{2}", title))
+
+
+def find_title_matched_files(user_input):
+    normalized_query = normalize_for_match(user_input)
+    if not normalized_query:
+        return []
+
+    matched_files = []
+    for parent_file in get_all_parent_files():
+        base_name = Path(parent_file).stem
+        normalized_title = normalize_for_match(base_name)
+        if not normalized_title or is_date_style_title(normalized_title):
+            continue
+
+        word_count = len(normalized_title.split())
+        if word_count < TITLE_MATCH_MIN_WORDS:
+            continue
+
+        if normalized_title in normalized_query:
+            matched_files.append((word_count, len(normalized_title), parent_file))
+
+    matched_files.sort(key=lambda item: (-item[0], -item[1], item[2]))
+    return [item[2] for item in matched_files[:TITLE_MATCH_LIMIT]]
 
 def handle_date_query(user_input):
     """
@@ -248,12 +138,7 @@ def handle_date_query(user_input):
     print(f"Range: {start_date.strftime('%Y-%m-%d')} -> {end_date.strftime('%Y-%m-%d')}")
 
     try:
-        all_records = collection.get(include=["metadatas"])
-        all_parent_files = {
-            meta["parent_file"]
-            for meta in all_records["metadatas"]
-            if "parent_file" in meta
-        }
+        all_parent_files = get_all_parent_files()
     except Exception as e:
         print(f"ChromaDB error: {e}")
         return [], []
@@ -276,10 +161,11 @@ def handle_date_query(user_input):
         print("No daily notes found in the specified range.")
         return [], []
 
-    print(f"Matched daily notes: {sorted(os.path.basename(f) for f in target_files)}")
+    sorted_target_files = sorted(target_files)
+    print(f"Matched daily notes: {sorted(os.path.basename(f) for f in sorted_target_files)}")
 
     ret_docs, ret_metas = [], []
-    for fp in target_files:
+    for fp in sorted_target_files:
         res = collection.get(where={"parent_file": {"$eq": fp}}, 
                              include=["documents", "metadatas"])
         print(f"[debug] querying parent_file={fp} -> {len(res['documents'])} docs")
@@ -321,6 +207,9 @@ def send_message(event=None):
         if not final_documents:
             print("Date query returned nothing; running generic search.")
             query_text = "\n".join([turn['content'] for turn in conversation_history[-6:]]) + f"\n{user_input}"
+            title_matched_files = find_title_matched_files(user_input)
+            if title_matched_files:
+                print(f"Title-matched files: {[os.path.basename(path) for path in title_matched_files]}")
 
             semantic_results = collection.query(
                 query_texts=[query_text],
@@ -336,6 +225,15 @@ def send_message(event=None):
 
             # de-duplicate
             final_docs = {}
+            for parent_file in title_matched_files:
+                title_results = collection.get(
+                    where={"parent_file": {"$eq": parent_file}},
+                    include=["metadatas", "documents"]
+                )
+                for i, doc_id in enumerate(title_results["ids"]):
+                    if doc_id not in final_docs:
+                        final_docs[doc_id] = {"doc": title_results["documents"][i],
+                                              "meta": title_results["metadatas"][i]}
             for i, doc_id in enumerate(semantic_results["ids"][0]):
                 if doc_id not in final_docs:
                     final_docs[doc_id] = {"doc": semantic_results["documents"][0][i],
@@ -415,8 +313,10 @@ def send_message(event=None):
             return
 
         model_id = "grok-3-mini" if selected_model_name == "Grok" else "gemini-2.5-flash"
+        today_str = datetime.now().strftime("%Y-%m-%d")
 
-        system_prompt = ('You are a helpful AI assistant, acting as a conversational partner '
+        system_prompt = (f'Today is {today_str}. Interpret relative time phrases against this date. '
+                         'You are a helpful AI assistant, acting as a conversational partner '
                          'with a casual and loose tone. Your primary goal is to answer my question. '
                          'Use the context from my notes to enrich your answer if it is relevant; '
                          'do so naturally. Weave the information into the conversation rather than '
