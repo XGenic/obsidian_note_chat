@@ -1,12 +1,12 @@
-# Obsidian Vault RAG Chat (Personalized)
+# Obsidian Vault RAG Chat
 
-This project is a highly customized, personal RAG (Retrieval-Augmented Generation) pipeline designed to facilitate a conversational interface with a specific Obsidian vault. It transforms a personal knowledge base into an intelligent, searchable companion that can answer questions and summarize information based on the user's own notes.
+A personal retrieval-augmented chat interface for my Obsidian notes. `index_vault.py` builds a ChromaDB index, and `chat_ui.py` provides a small Tkinter interface for asking questions across the vault.
 
-**Note:** This is not a general-purpose, plug-and-play tool. The indexing and retrieval logic is tightly coupled to the user's specific note-taking formats and vault structure. Adapting it for another vault would require significant modification of the classification and chunking rules in `index_vault.py`.
+This follows my own note formats and folder conventions, so it is a project reference rather than a drop-in Obsidian plugin. Adapting it for another vault means changing the parsing, chunking rules, and local paths.
 
-## Core Techniques & Implementation Details
+## How it works
 
-This project employs several advanced techniques to provide relevant, context-aware responses.
+The main design decisions are:
 
 *   **Dynamic, Multi-Tiered Indexing Strategy**: The system intelligently classifies notes and applies a different indexing strategy based on the note's structure and location:
     *   **Conversation Summaries**: For long conversation transcripts, it specifically extracts and indexes only the `## Overall Summary` section to capture the essence without noise.
@@ -43,8 +43,8 @@ This project employs several advanced techniques to provide relevant, context-aw
 ### 1. Clone the Repository
 
 ```bash
-git clone <your-repository-url>
-cd <repository-directory>
+git clone https://github.com/XGenic/obsidian_note_chat.git
+cd obsidian_note_chat
 ```
 
 ### 2. Install Dependencies
